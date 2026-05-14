@@ -3,11 +3,12 @@ import { FaIdBadge } from 'react-icons/fa';
 import FeaturePage from '../components/FeaturePage';
 
 const tableColumns = [
-  { key: 'visitorName', label: 'Visitor Name' },
+  { key: 'visitor_name', label: 'Visitor Name' },
   { key: 'purpose', label: 'Purpose' },
-  { key: 'status', label: 'Status' },
-  { key: 'hostName', label: 'Host' },
-  { key: 'date', label: 'Visit Date' },
+  { key: 'host_staff', label: 'Host' },
+  { key: 'id_verified', label: 'ID Verified' },
+  { key: 'risk_score', label: 'Risk Score' },
+  { key: 'created_at', label: 'Date' },
 ];
 
 const formFields = [

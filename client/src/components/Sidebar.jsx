@@ -109,6 +109,27 @@ function Sidebar({ user, onLogout }) {
             <span className="link-icon"><FaRobot /></span>
             AI Safety Center
           </NavLink>
+          <NavLink
+            to="/threat-board"
+            className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
+          >
+            <span className="link-icon"><FaExclamationTriangle /></span>
+            Threat Status Board
+          </NavLink>
+          <NavLink
+            to="/drill-simulation"
+            className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
+          >
+            <span className="link-icon"><FaRunning /></span>
+            Drill Simulator
+          </NavLink>
+          <NavLink
+            to="/audit-log"
+            className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
+          >
+            <span className="link-icon"><FaClipboardList /></span>
+            Audit Log
+          </NavLink>
         </div>
       </nav>
 

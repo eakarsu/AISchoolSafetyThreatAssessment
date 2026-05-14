@@ -2,22 +2,34 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db');
 const { askAI } = require('../openrouter');
+const auth = require('../middleware/auth');
+const { aiRateLimiter } = require('../middleware/rateLimiter');
 
 const TABLE = 'communication_alerts';
-const SYSTEM_PROMPT = `You are a school crisis communication specialist. Analyze this communication alert and provide:
-1) Message clarity and effectiveness assessment
-2) Audience appropriateness evaluation
-3) Timing and urgency alignment
-4) Tone and language recommendations
-5) Follow-up communication needs
-6) Multi-channel distribution recommendations
-7) Legal and compliance considerations
-Focus on clear, actionable communication that reduces panic while ensuring safety.`;
+const SYSTEM_PROMPT = `You are a school crisis communication specialist. Respond ONLY with valid JSON:
+{
+  "clarity_score": <integer 0-100>,
+  "audience_appropriateness": "appropriate|needs adjustment",
+  "tone_assessment": "assessment text",
+  "follow_up_needed": <boolean>,
+  "distribution_channels": ["channel1", "channel2"],
+  "legal_compliance": "compliance notes",
+  "improved_message": "suggested improved message text"
+}`;
+
+router.use(auth);
 
 router.get('/', async (req, res, next) => {
   try {
-    const result = await pool.query(`SELECT * FROM ${TABLE} ORDER BY created_at DESC`);
-    res.json(result.rows);
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, parseInt(req.query.limit) || 20);
+    const offset = (page - 1) * limit;
+    const [dataRes, countRes] = await Promise.all([
+      pool.query(`SELECT * FROM ${TABLE} ORDER BY created_at DESC LIMIT $1 OFFSET $2`, [limit, offset]),
+      pool.query(`SELECT COUNT(*) FROM ${TABLE}`),
+    ]);
+    const total = parseInt(countRes.rows[0].count);
+    res.json({ data: dataRes.rows, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
   } catch (error) { next(error); }
 });
 
@@ -62,24 +74,18 @@ router.delete('/:id', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-router.post('/:id/analyze', async (req, res, next) => {
+router.post('/:id/analyze', aiRateLimiter, async (req, res, next) => {
   try {
     const result = await pool.query(`SELECT * FROM ${TABLE} WHERE id = $1`, [req.params.id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
     const item = result.rows[0];
-    const userPrompt = `Communication Alert:\nAlert Type: ${item.alert_type}\nTitle: ${item.title}\nMessage: ${item.message}\nPriority: ${item.priority}\nTarget Audience: ${item.target_audience}\nSent At: ${item.sent_at}\nStatus: ${item.status}`;
-    const analysis = await askAI(SYSTEM_PROMPT, userPrompt);
-    await pool.query(`UPDATE ${TABLE} SET ai_analysis = $1 WHERE id = $2`, [analysis, req.params.id]);
-    res.json({ analysis });
-  } catch (error) { next(error); }
-});
-
-router.post('/ai-analyze', async (req, res, next) => {
-  try {
-    const { alert_type, title, message, priority, target_audience } = req.body;
-    const userPrompt = `Communication Alert:\nAlert Type: ${alert_type || 'N/A'}\nTitle: ${title || 'N/A'}\nMessage: ${message || 'N/A'}\nPriority: ${priority || 'N/A'}\nTarget Audience: ${target_audience || 'N/A'}`;
-    const analysis = await askAI(SYSTEM_PROMPT, userPrompt);
-    res.json({ analysis });
+    const userPrompt = `Alert: ${item.title}, Type: ${item.alert_type}, Message: ${item.message}, Priority: ${item.priority}, Audience: ${item.target_audience}`;
+    const parsed = await askAI(SYSTEM_PROMPT, userPrompt, true);
+    const analysis = parsed ? JSON.stringify(parsed) : userPrompt;
+    await pool.query(`UPDATE ${TABLE} SET ai_analysis = $1 WHERE id = $2`, [analysis, item.id]);
+    await pool.query(`INSERT INTO ai_analyses (user_id, endpoint, entity_id, result) VALUES ($1,$2,$3,$4)`,
+      [req.user.id, 'alerts/analyze', item.id, analysis]).catch(() => {});
+    res.json({ analysis: parsed || analysis });
   } catch (error) { next(error); }
 });
 

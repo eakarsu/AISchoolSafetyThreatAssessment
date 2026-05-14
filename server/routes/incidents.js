@@ -2,21 +2,34 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db');
 const { askAI } = require('../openrouter');
+const auth = require('../middleware/auth');
+const { aiRateLimiter } = require('../middleware/rateLimiter');
 
 const TABLE = 'incident_reports';
-const SYSTEM_PROMPT = `You are a school safety incident analysis expert. Analyze this incident report and provide:
-1) Severity assessment and classification
-2) Root cause analysis
-3) Recommended immediate response actions
-4) Preventive measures to avoid recurrence
-5) Documentation and follow-up requirements
-6) Liability considerations
-Be thorough, professional, and focused on preventing future incidents.`;
+const SYSTEM_PROMPT = `You are a school safety incident analysis expert. Respond ONLY with valid JSON:
+{
+  "severity": "low|medium|high|critical",
+  "classification": "classification text",
+  "root_causes": ["cause1", "cause2"],
+  "immediate_actions": ["action1", "action2"],
+  "preventive_measures": ["measure1", "measure2"],
+  "documentation_requirements": ["req1"],
+  "liability_considerations": "liability text"
+}`;
+
+router.use(auth);
 
 router.get('/', async (req, res, next) => {
   try {
-    const result = await pool.query(`SELECT * FROM ${TABLE} ORDER BY created_at DESC`);
-    res.json(result.rows);
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, parseInt(req.query.limit) || 20);
+    const offset = (page - 1) * limit;
+    const [dataRes, countRes] = await Promise.all([
+      pool.query(`SELECT * FROM ${TABLE} ORDER BY created_at DESC LIMIT $1 OFFSET $2`, [limit, offset]),
+      pool.query(`SELECT COUNT(*) FROM ${TABLE}`),
+    ]);
+    const total = parseInt(countRes.rows[0].count);
+    res.json({ data: dataRes.rows, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
   } catch (error) { next(error); }
 });
 
@@ -61,24 +74,18 @@ router.delete('/:id', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-router.post('/:id/analyze', async (req, res, next) => {
+router.post('/:id/analyze', aiRateLimiter, async (req, res, next) => {
   try {
     const result = await pool.query(`SELECT * FROM ${TABLE} WHERE id = $1`, [req.params.id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
     const item = result.rows[0];
-    const userPrompt = `Incident Report:\nTitle: ${item.title}\nType: ${item.incident_type}\nDescription: ${item.description}\nLocation: ${item.location}\nDate: ${item.date}\nSeverity: ${item.severity}\nStatus: ${item.status}\nReported By: ${item.reported_by}`;
-    const analysis = await askAI(SYSTEM_PROMPT, userPrompt);
-    await pool.query(`UPDATE ${TABLE} SET ai_analysis = $1 WHERE id = $2`, [analysis, req.params.id]);
-    res.json({ analysis });
-  } catch (error) { next(error); }
-});
-
-router.post('/ai-analyze', async (req, res, next) => {
-  try {
-    const { title, description, incident_type, location, date, severity, reported_by } = req.body;
-    const userPrompt = `Incident Report:\nTitle: ${title || 'N/A'}\nType: ${incident_type || 'N/A'}\nDescription: ${description || 'N/A'}\nLocation: ${location || 'N/A'}\nDate: ${date || 'N/A'}\nSeverity: ${severity || 'N/A'}\nReported By: ${reported_by || 'N/A'}`;
-    const analysis = await askAI(SYSTEM_PROMPT, userPrompt);
-    res.json({ analysis });
+    const userPrompt = `Incident: ${item.title}, Type: ${item.incident_type}, Description: ${item.description}, Location: ${item.location}, Severity: ${item.severity}`;
+    const parsed = await askAI(SYSTEM_PROMPT, userPrompt, true);
+    const analysis = parsed ? JSON.stringify(parsed) : userPrompt;
+    await pool.query(`UPDATE ${TABLE} SET ai_analysis = $1 WHERE id = $2`, [analysis, item.id]);
+    await pool.query(`INSERT INTO ai_analyses (user_id, endpoint, entity_id, result) VALUES ($1,$2,$3,$4)`,
+      [req.user.id, 'incidents/analyze', item.id, analysis]).catch(() => {});
+    res.json({ analysis: parsed || analysis });
   } catch (error) { next(error); }
 });
 

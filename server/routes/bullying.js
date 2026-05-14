@@ -2,22 +2,35 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db');
 const { askAI } = require('../openrouter');
+const auth = require('../middleware/auth');
+const { aiRateLimiter } = require('../middleware/rateLimiter');
 
 const TABLE = 'bullying_reports';
-const SYSTEM_PROMPT = `You are a school anti-bullying specialist and child safety expert. Analyze this bullying report and provide:
-1) Severity assessment and type classification
-2) Immediate safety measures for the victim
-3) Evidence-based intervention strategies for the aggressor
-4) Recommended disciplinary actions aligned with school policy
-5) Support resources for all parties involved
-6) Monitoring plan to prevent recurrence
-7) Legal considerations if applicable (Title IX, criminal behavior)
-Prioritize the victim's safety and emotional well-being while considering restorative justice approaches.`;
+const SYSTEM_PROMPT = `You are a school anti-bullying specialist. Respond ONLY with valid JSON:
+{
+  "severity": "low|medium|high|critical",
+  "type_classification": "classification text",
+  "victim_safety_measures": ["measure1", "measure2"],
+  "aggressor_interventions": ["intervention1"],
+  "disciplinary_actions": ["action1"],
+  "support_resources": ["resource1"],
+  "monitoring_plan": "monitoring plan text",
+  "legal_considerations": "legal notes or null"
+}`;
+
+router.use(auth);
 
 router.get('/', async (req, res, next) => {
   try {
-    const result = await pool.query(`SELECT * FROM ${TABLE} ORDER BY created_at DESC`);
-    res.json(result.rows);
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, parseInt(req.query.limit) || 20);
+    const offset = (page - 1) * limit;
+    const [dataRes, countRes] = await Promise.all([
+      pool.query(`SELECT * FROM ${TABLE} ORDER BY created_at DESC LIMIT $1 OFFSET $2`, [limit, offset]),
+      pool.query(`SELECT COUNT(*) FROM ${TABLE}`),
+    ]);
+    const total = parseInt(countRes.rows[0].count);
+    res.json({ data: dataRes.rows, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
   } catch (error) { next(error); }
 });
 
@@ -62,24 +75,18 @@ router.delete('/:id', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-router.post('/:id/analyze', async (req, res, next) => {
+router.post('/:id/analyze', aiRateLimiter, async (req, res, next) => {
   try {
     const result = await pool.query(`SELECT * FROM ${TABLE} WHERE id = $1`, [req.params.id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
     const item = result.rows[0];
-    const userPrompt = `Bullying Report:\nReporter Type: ${item.reporter_type}\nVictim Grade: ${item.victim_grade}\nBully Grade: ${item.bully_grade}\nIncident Type: ${item.incident_type}\nDescription: ${item.description}\nLocation: ${item.location}\nAction Taken: ${item.action_taken}`;
-    const analysis = await askAI(SYSTEM_PROMPT, userPrompt);
-    await pool.query(`UPDATE ${TABLE} SET ai_analysis = $1 WHERE id = $2`, [analysis, req.params.id]);
-    res.json({ analysis });
-  } catch (error) { next(error); }
-});
-
-router.post('/ai-analyze', async (req, res, next) => {
-  try {
-    const { reporter_type, victim_grade, bully_grade, incident_type, description, location, action_taken } = req.body;
-    const userPrompt = `Bullying Report:\nReporter Type: ${reporter_type || 'N/A'}\nVictim Grade: ${victim_grade || 'N/A'}\nBully Grade: ${bully_grade || 'N/A'}\nIncident Type: ${incident_type || 'N/A'}\nDescription: ${description || 'N/A'}\nLocation: ${location || 'N/A'}\nAction Taken: ${action_taken || 'N/A'}`;
-    const analysis = await askAI(SYSTEM_PROMPT, userPrompt);
-    res.json({ analysis });
+    const userPrompt = `Bullying Report: Type: ${item.incident_type}, Description: ${item.description}, Location: ${item.location}, Action: ${item.action_taken}`;
+    const parsed = await askAI(SYSTEM_PROMPT, userPrompt, true);
+    const analysis = parsed ? JSON.stringify(parsed) : userPrompt;
+    await pool.query(`UPDATE ${TABLE} SET ai_analysis = $1 WHERE id = $2`, [analysis, item.id]);
+    await pool.query(`INSERT INTO ai_analyses (user_id, endpoint, entity_id, result) VALUES ($1,$2,$3,$4)`,
+      [req.user.id, 'bullying/analyze', item.id, analysis]).catch(() => {});
+    res.json({ analysis: parsed || analysis });
   } catch (error) { next(error); }
 });
 
