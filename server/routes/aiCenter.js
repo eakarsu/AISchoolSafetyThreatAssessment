@@ -53,7 +53,7 @@ Data: Threats: ${JSON.stringify(threats.rows)}, Incidents: ${JSON.stringify(inci
     await pool.query(`INSERT INTO ai_analyses (user_id, endpoint, entity_id, result) VALUES ($1,$2,$3,$4)`,
       [req.user.id, 'ai-center/risk-predict', null, JSON.stringify(parsed)]).catch(() => {});
 
-    res.json({ prediction: parsed, model: 'anthropic/claude-3-5-sonnet-20241022' });
+    res.json({ prediction: parsed, model: (process.env.OPENROUTER_MODEL || 'anthropic/claude-haiku-4.5') });
   } catch (error) { next(error); }
 });
 
@@ -209,6 +209,202 @@ Return JSON: { overall_compliance_pct:0-100, by_role:[{role,compliance_pct,gaps:
     await pool.query(`INSERT INTO ai_analyses (user_id, endpoint, entity_id, result) VALUES ($1,$2,$3,$4)`,
       [req.user.id, 'ai-center/training-compliance-aggregate', null, JSON.stringify(parsed)]).catch(() => {});
     res.json({ compliance: parsed });
+  } catch (error) { next(error); }
+});
+
+// POST /anonymous-report - file an anonymous safety report, server strips PII, never stores submitter identity
+const crypto = require('crypto');
+router.post('/anonymous-report', aiRateLimiter, async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    // Allow-list of sanitized fields ONLY — explicitly discard any user-identifying fields
+    // (name, email, phone, user_id, submitter, ip, device_id, etc. are NEVER read).
+    const allowedCategories = ['bullying', 'threat', 'safety_concern', 'other'];
+    const category = allowedCategories.includes(body.category) ? body.category : 'other';
+    const description = typeof body.description === 'string' ? body.description.slice(0, 5000) : '';
+    const school_id = (typeof body.school_id === 'string' || typeof body.school_id === 'number') ? body.school_id : null;
+    const location_hint = typeof body.location_hint === 'string' ? body.location_hint.slice(0, 500) : null;
+    const has_imminent_threat = body.has_imminent_threat === true;
+
+    if (!description) return res.status(400).json({ error: 'description is required' });
+
+    // Light PII scrubbing on the description before any persistence/LLM call
+    const piiPatterns = {
+      emails: /[\w.+-]+@[\w-]+\.[\w.-]+/g,
+      phones: /\b(?:\+?1[-. ]?)?\(?\d{3}\)?[-. ]?\d{3}[-. ]?\d{4}\b/g,
+      ssn: /\b\d{3}-\d{2}-\d{4}\b/g,
+    };
+    let scrubbed = description;
+    for (const [k, re] of Object.entries(piiPatterns)) {
+      scrubbed = scrubbed.replace(re, `[${k.toUpperCase()}_REDACTED]`);
+    }
+
+    const report_id = crypto.randomUUID();
+
+    // Classify severity (LLM optional — degrade gracefully if no key)
+    const systemPrompt = `You are an anonymous K-12 safety-report triage AI. PII has been pre-redacted. Classify severity and decide whether immediate escalation to law enforcement / SRO is warranted. Respond ONLY with valid JSON.`;
+    const userPrompt = `Category: ${category}
+Imminent-threat flag from submitter: ${has_imminent_threat}
+Location hint: ${location_hint || 'unspecified'}
+Scrubbed description: ${scrubbed}
+
+Return JSON: { severity_classification:"low|moderate|high|imminent", escalation_triggered:bool, next_steps_recommended:[{step,owner:"sro|admin|counselor|law_enforcement",urgency:"immediate|24h|routine"}], rationale }.`;
+    const parsed = await askAI(systemPrompt, userPrompt, true);
+
+    // Fallback classification when AI unavailable — never block an anonymous report
+    let severity_classification = 'moderate';
+    let escalation_triggered = !!has_imminent_threat;
+    let next_steps_recommended = [
+      { step: 'Acknowledge receipt in tip-management dashboard', owner: 'admin', urgency: '24h' },
+      { step: 'Route to appropriate role for follow-up', owner: 'admin', urgency: '24h' },
+    ];
+    if (parsed && typeof parsed === 'object') {
+      if (typeof parsed.severity_classification === 'string') severity_classification = parsed.severity_classification;
+      if (typeof parsed.escalation_triggered === 'boolean') escalation_triggered = parsed.escalation_triggered || escalation_triggered;
+      if (Array.isArray(parsed.next_steps_recommended) && parsed.next_steps_recommended.length) {
+        next_steps_recommended = parsed.next_steps_recommended;
+      }
+    }
+    if (has_imminent_threat) {
+      severity_classification = severity_classification === 'low' ? 'high' : (severity_classification || 'high');
+      escalation_triggered = true;
+    }
+
+    // Persist sanitized fields only — NEVER store submitter identity, IP, or auth user_id.
+    // Try anonymous_tips first; if schema differs, fall back to ai_analyses.
+    const persistPayload = {
+      report_id,
+      category,
+      description: scrubbed,
+      school_id,
+      location_hint,
+      has_imminent_threat,
+      severity_classification,
+      escalation_triggered,
+    };
+    await pool.query(
+      `INSERT INTO anonymous_tips (tip_text, category, priority, status, submitter_hash) VALUES ($1,$2,$3,$4,$5)`,
+      [scrubbed, category, severity_classification, escalation_triggered ? 'escalated' : 'new', report_id]
+    ).catch(async () => {
+      await pool.query(
+        `INSERT INTO ai_analyses (user_id, endpoint, entity_id, result) VALUES ($1,$2,$3,$4)`,
+        [null, 'ai-center/anonymous-report', null, JSON.stringify(persistPayload)]
+      ).catch(() => {});
+    });
+
+    res.json({
+      report_id,
+      category,
+      severity_classification,
+      escalation_triggered,
+      next_steps_recommended,
+    });
+  } catch (error) { next(error); }
+});
+
+// GET /training-compliance - aggregator dashboard for training records, certifications, overdue staff
+router.get('/training-compliance', async (req, res, next) => {
+  try {
+    const { district_id, period } = req.query || {};
+
+    // Aggregate from existing tables with graceful fallback if any are absent
+    const [programs, trainingRecords, certifications, staff, drills] = await Promise.all([
+      pool.query(`SELECT id, program_name, training_type, participants, completion_rate, status FROM training_programs`).catch(() => ({ rows: [] })),
+      pool.query(`SELECT * FROM training_records`).catch(() => ({ rows: [] })),
+      pool.query(`SELECT * FROM staff_certifications`).catch(() => ({ rows: [] })),
+      pool.query(`SELECT id, name, role, school_id FROM staff`).catch(() => ({ rows: [] })),
+      pool.query(`SELECT drill_type, status FROM drills`).catch(() => ({ rows: [] })),
+    ]);
+
+    // Compute overall compliance from training_programs.completion_rate (0-100)
+    const progs = programs.rows || [];
+    const rates = progs.map(p => Number(p.completion_rate)).filter(n => !isNaN(n));
+    const overall_compliance_pct = rates.length
+      ? Math.round(rates.reduce((a, b) => a + b, 0) / rates.length)
+      : 0;
+
+    // Per-school aggregation (best-effort — schools may live in staff rows or not at all)
+    const schoolMap = new Map();
+    for (const s of (staff.rows || [])) {
+      const sid = s.school_id || 'unassigned';
+      if (!schoolMap.has(sid)) schoolMap.set(sid, { school_id: sid, staff_count: 0, overdue_count: 0 });
+      schoolMap.get(sid).staff_count += 1;
+    }
+    const now = Date.now();
+    const isExpired = (d) => {
+      if (!d) return false;
+      const t = new Date(d).getTime();
+      return !isNaN(t) && t < now;
+    };
+    const isExpiringSoon = (d, days = 60) => {
+      if (!d) return false;
+      const t = new Date(d).getTime();
+      if (isNaN(t)) return false;
+      const horizon = now + days * 24 * 60 * 60 * 1000;
+      return t >= now && t <= horizon;
+    };
+
+    const certRows = certifications.rows || [];
+    const expiring_certifications = certRows.filter(c => isExpiringSoon(c.expires_at || c.expiration_date || c.expires));
+    const expired_certifications = certRows.filter(c => isExpired(c.expires_at || c.expiration_date || c.expires));
+
+    // Overdue staff = staff with at least one expired cert OR no recorded training
+    const recordRows = trainingRecords.rows || [];
+    const staffWithRecord = new Set(recordRows.map(r => r.staff_id || r.user_id).filter(Boolean));
+    const overdue_staff = (staff.rows || []).filter(s => {
+      const hasNoRecord = staffWithRecord.size > 0 && !staffWithRecord.has(s.id);
+      const hasExpiredCert = expired_certifications.some(c => (c.staff_id || c.user_id) === s.id);
+      return hasExpiredCert || hasNoRecord;
+    }).map(s => ({ staff_id: s.id, name: s.name, role: s.role, school_id: s.school_id }));
+
+    // Bump per-school overdue counts
+    for (const o of overdue_staff) {
+      const sid = o.school_id || 'unassigned';
+      if (!schoolMap.has(sid)) schoolMap.set(sid, { school_id: sid, staff_count: 0, overdue_count: 0 });
+      schoolMap.get(sid).overdue_count += 1;
+    }
+
+    const per_school = Array.from(schoolMap.values()).map(s => ({
+      ...s,
+      compliance_pct: s.staff_count > 0
+        ? Math.max(0, Math.round(((s.staff_count - s.overdue_count) / s.staff_count) * 100))
+        : overall_compliance_pct,
+    }));
+
+    const recommended_actions = [];
+    if (expired_certifications.length > 0) {
+      recommended_actions.push({ action: `Renew ${expired_certifications.length} expired certification(s)`, urgency: 'immediate' });
+    }
+    if (expiring_certifications.length > 0) {
+      recommended_actions.push({ action: `Schedule renewal for ${expiring_certifications.length} cert(s) expiring in <60 days`, urgency: 'short_term' });
+    }
+    if (overdue_staff.length > 0) {
+      recommended_actions.push({ action: `Assign mandatory training to ${overdue_staff.length} overdue staff`, urgency: 'short_term' });
+    }
+    const atRiskPrograms = progs.filter(p => Number(p.completion_rate) < 80);
+    if (atRiskPrograms.length > 0) {
+      recommended_actions.push({ action: `Boost completion for ${atRiskPrograms.length} program(s) below 80%`, urgency: 'short_term' });
+    }
+    if (recommended_actions.length === 0) {
+      recommended_actions.push({ action: 'Compliance healthy — continue monthly audit cadence', urgency: 'routine' });
+    }
+
+    res.json({
+      district_id: district_id || null,
+      period: period || 'current',
+      overall_compliance_pct,
+      per_school,
+      expiring_certifications,
+      overdue_staff,
+      recommended_actions,
+      meta: {
+        programs_count: progs.length,
+        training_records_count: recordRows.length,
+        certifications_count: certRows.length,
+        staff_count: (staff.rows || []).length,
+        drills_count: (drills.rows || []).length,
+      },
+    });
   } catch (error) { next(error); }
 });
 

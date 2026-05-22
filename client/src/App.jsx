@@ -49,6 +49,11 @@ import GapNoMassnotificationSmsvoiceEmergencyComms from './pages/GapNoMassnotifi
 import GapNoFirstresponderIntegrationCadPush from './pages/GapNoFirstresponderIntegrationCadPush';
 import GapNoSisStudentInformationSystemIntegratio from './pages/GapNoSisStudentInformationSystemIntegratio';
 import GapLimitedTrainingComplianceTracking from './pages/GapLimitedTrainingComplianceTracking';
+import CodexCustomVizFeature from './pages/CodexCustomVizFeature';
+import CodexOperationsFeature from './pages/CodexOperationsFeature';
+
+import TimelineView from './pages/TimelineView';
+
 // === End Batch 07 ===
 
 
@@ -91,6 +96,10 @@ function App() {
       <Sidebar user={user} onLogout={handleLogout} />
       <main className="main-content">
         <Routes>
+        <Route path="/insights/timeline" element={<TimelineView />} />
+        <Route path="/codex/custom-viz" element={<CodexCustomVizFeature />} />
+        <Route path="/codex/operations" element={<CodexOperationsFeature />} />
+
           <Route path="/" element={<Dashboard token={token} />} />
           <Route path="/threats" element={<ThreatAssessments token={token} />} />
           <Route path="/incidents" element={<IncidentReports token={token} />} />

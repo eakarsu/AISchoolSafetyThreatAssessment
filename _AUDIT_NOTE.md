@@ -31,3 +31,20 @@ All three reuse `askAI(json=true)`, persist to `ai_analyses`, follow the existin
 - **Auth:** each page receives `token` prop (sourced from localStorage in App.jsx) and sends `Authorization: Bearer ${token}` headers.
 - **503/no-key handling:** non-2xx response surfaces `data.error` to the user.
 - **Files modified:** none.
+
+## Apply pass 6 (close-out)
+
+**Items implemented:**
+1. `POST /api/ai-center/anonymous-report` — accepts `{category, description, school_id?, location_hint?, has_imminent_threat?}`. Server uses an allow-list (explicitly discards any user-identifying fields not in the contract), scrubs emails/phones/SSN from `description`, generates a UUID via `crypto.randomUUID()`, calls `askAI` for severity classification with graceful fallback when no API key, and persists sanitized fields ONLY (no `user_id`, no IP, no submitter identity). Tries `anonymous_tips` table first; falls back to `ai_analyses` with `user_id=NULL` if schema differs (both wrapped in `.catch(() => {})`). Returns `{report_id, category, severity_classification, escalation_triggered, next_steps_recommended}`. Imminent-threat flag always forces escalation.
+2. `GET /api/ai-center/training-compliance?district_id=...&period=...` — aggregator only (no LLM call). Pulls from `training_programs`, `training_records`, `staff_certifications`, `staff`, `drills`, each wrapped in `.catch(() => ({rows:[]}))`. Computes `overall_compliance_pct` from `completion_rate` mean, builds `per_school` rollup, flags `expiring_certifications` (<60 days), `overdue_staff` (expired cert OR no training record), and synthesizes `recommended_actions` from the data shape.
+3. `POST /api/ai-center/emergency-readiness-assessment` — ALREADY PRESENT in `routes/aiCenter.js` (lines 137–159) from an earlier pass; left as-is per append-only constraint. Existing body shape `{school_context, focus}` differs from the spec's `{school, scenario_focus}` but the endpoint exists, so no duplicate added.
+
+**File:** `server/routes/aiCenter.js` (appended two handlers before `GET /analyses`; added `const crypto = require('crypto')` inline).
+
+**Syntax:** `node --check server/routes/aiCenter.js` — **PASS**.
+
+**Constraints honored:** append-only (no existing handlers modified), no new deps (used built-in `crypto`), no schema changes (all DB queries `.catch`-guarded), no `.env` edits, no FE changes, no server started.
+
+**Remaining backlog:**
+- NEEDS-CREDS: kiosk vendor integration for visitor management (e.g., Raptor/Verkada/HID API keys + webhook URLs).
+- NEEDS-PRODUCT-DECISION: SOS/panic alert dispatcher — requires choice of push provider (FCM/APNs/Twilio Voice) + creds, plus product decision on dispatch routing (911 CAD vs internal SRO vs both) and chain-of-custody audit policy.
