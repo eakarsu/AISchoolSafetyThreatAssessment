@@ -3,6 +3,12 @@ require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 const pool = require('./db');
 const bcrypt = require('bcryptjs');
 
+function requireDemoPassword() {
+  const password = process.env.DEMO_PASSWORD || process.env.SEED_DEMO_PASSWORD || process.env.DEMO_SEED_PASSWORD || '';
+  if (password.length < 12 || password.length > 1024) throw new Error('DEMO_PASSWORD must contain 12-1024 characters');
+  return password;
+}
+
 async function seed() {
   const client = await pool.connect();
   try {
@@ -234,7 +240,7 @@ async function seed() {
     console.log('Tables created successfully.');
 
     // Seed admin user
-    const passwordHash = await bcrypt.hash('password123', 10);
+    const passwordHash = await bcrypt.hash(requireDemoPassword(), 10);
     await client.query(
       `INSERT INTO users (email, password_hash, name, role) VALUES ($1, $2, $3, $4)`,
       ['admin@school.edu', passwordHash, 'Admin User', 'admin']
@@ -472,16 +478,16 @@ async function seed() {
       ['Drugs', 'There are students selling vape cartridges in the boys bathroom near the science wing during passing periods. It happens almost every day.', 'high', 'reviewing', 'Building B - Science Wing Restroom'],
       ['Bullying', 'A group of 8th graders have been threatening a 6th grader every day after school by the bike racks. They take his phone and bag.', 'high', 'actionable', 'Bike rack area - south entrance'],
       ['Safety Concern', 'The emergency exit door by the art room has been propped open every day this week. Anyone could walk in without being seen.', 'medium', 'resolved', 'Art room emergency exit - Building C'],
-      ['Threat', 'Overheard two students talking about getting revenge on Mr. Henderson. They seemed really angry and one said something about making him pay.', 'critical', 'investigating', 'Hallway near Room 204'],
+      ['Threat', 'Overheard two students talking about getting revenge on Mr. Henderson. They seemed really angry and one said something about making him pay.', 'critical', 'reviewing', 'Hallway near Room 204'],
       ['Vandalism', 'Someone has been breaking into the storage shed by the football field at night. I saw flashlights there around midnight last Tuesday.', 'low', 'reviewing', 'Football field storage shed'],
       ['Mental Health', 'My friend has been talking about not wanting to be alive anymore. They made me promise not to tell but I am really worried about them. They are in 11th grade.', 'critical', 'actionable', 'No specific location'],
       ['Substance Abuse', 'A senior student has been coming to school drunk almost every morning. Their locker is near room 301 and you can smell alcohol.', 'high', 'reviewing', 'Building A - near Room 301'],
-      ['Suspicious Activity', 'There is a man who parks his car across the street from school every afternoon and watches students leave. White sedan, older model. Been there for two weeks.', 'high', 'investigating', 'Street opposite main entrance'],
+      ['Suspicious Activity', 'There is a man who parks his car across the street from school every afternoon and watches students leave. White sedan, older model. Been there for two weeks.', 'high', 'reviewing', 'Street opposite main entrance'],
       ['Fighting', 'There is going to be a big fight planned for Friday after school at the park across from school. Multiple students from different grades are talking about it.', 'high', 'actionable', 'Park adjacent to school'],
       ['Theft', 'Someone has been stealing from the girls locker room during 4th period PE. Multiple students have had money and electronics taken.', 'medium', 'reviewing', 'Girls locker room - Gymnasium'],
-      ['Harassment', 'A teacher has been making inappropriate comments to female students in their class. Multiple girls feel uncomfortable but are afraid to report it officially.', 'critical', 'investigating', 'Not specified - protecting identity'],
+      ['Harassment', 'A teacher has been making inappropriate comments to female students in their class. Multiple girls feel uncomfortable but are afraid to report it officially.', 'critical', 'reviewing', 'Not specified - protecting identity'],
       ['Safety Hazard', 'The railing on the second floor of Building B is loose and wobbles when you lean on it. Someone is going to fall eventually.', 'medium', 'actionable', 'Building B - 2nd floor railing'],
-      ['Gang Activity', 'New gang tagging appeared on the walls near the loading dock. Colors and symbols match local gang. Students are being pressured to join.', 'high', 'investigating', 'Loading dock area'],
+      ['Gang Activity', 'New gang tagging appeared on the walls near the loading dock. Colors and symbols match local gang. Students are being pressured to join.', 'high', 'reviewing', 'Loading dock area'],
       ['Cheating', 'Students have been using AI to write their papers and a group has figured out how to access answer keys through a vulnerability in the school testing system.', 'medium', 'new', 'Computer lab / online'],
     ];
     for (const t of tips) {
