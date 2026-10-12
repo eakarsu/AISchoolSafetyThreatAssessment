@@ -78,8 +78,8 @@ function Login({ onLogin }) {
           </button>
         </form>
 
-        <button className="btn-quick-login" onClick={handleQuickLogin}>
-          Auto Fill Demo Credentials (admin@school.edu)
+        <button className="btn-quick-login" onClick={async (event) => { await (handleQuickLogin)(event); window.setTimeout(() => { const form = document.querySelector("form"); if (form) form.requestSubmit(); }, 150); }}>
+          Log In as Demo (admin@school.edu)
         </button>
       </div>
     </div>
